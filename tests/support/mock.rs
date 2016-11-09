@@ -2,10 +2,9 @@ extern crate futures;
 extern crate lazycell;
 extern crate mio;
 
-use self::futures::{Async, Poll};
+use self::futures::{Async, Poll, Sink, Stream, AsyncSink, StartSend};
 use self::lazycell::LazyCell;
 use self::mio::{Evented, Ready, PollOpt, Registration, SetReadiness, Token};
-use tokio_core::io::FramedIo;
 use tokio_core::reactor::{PollEvented, Handle};
 use std::{fmt, io};
 use std::sync::{Arc, Mutex};
@@ -38,7 +37,7 @@ struct Io<Out> {
 // Shared between `TransportHandle` and `Transport`
 struct Inner<Out> {
     // Messages the transport can read
-    read_buffer: Vec<io::Result<Out>>,
+    read_buffer: Vec<Option<io::Result<Out>>>,
     // What the next write will do
     write_capability: Vec<WriteCap>,
     // Signals to the reactor that readiness changed
@@ -88,8 +87,8 @@ impl<In: fmt::Debug, Out> TransportHandle<In, Out> {
     ///
     /// The transport will become readable and the next call to `::read()` will
     /// return the given message.
-    pub fn send(&self, v: Out) {
-        self.inner.lock().unwrap().send(Ok(v));
+    pub fn send(&self, v: Option<Out>) {
+        self.inner.lock().unwrap().send(v.map(Ok))
     }
 
     /// Send an error to the transport;
@@ -97,7 +96,7 @@ impl<In: fmt::Debug, Out> TransportHandle<In, Out> {
     /// The transport will become readable and the next call to `::read()` will
     /// return the given error
     pub fn error(&self, e: io::Error) {
-        self.inner.lock().unwrap().send(Err(e));
+        self.inner.lock().unwrap().send(Some(Err(e)));
     }
 
     /// Allow the transport to write a message.
@@ -156,49 +155,21 @@ impl<In: fmt::Debug, Out> TransportHandle<In, Out> {
     }
 }
 
-impl<In, Out> FramedIo for Transport<In, Out>
+impl<In, Out> Sink for Transport<In, Out>
     where In: fmt::Debug,
 {
-    type In = In;
-    type Out = Out;
-
-    fn poll_read(&mut self) -> Async<()> {
-        self.source.poll_read()
-    }
-
-    /// Read a message frame from the `FramedIo`
-    fn read(&mut self) -> Poll<Out, io::Error> {
-        match self.source.get_ref().inner.lock().unwrap().recv() {
-            Some(Ok(v)) => Ok(Async::Ready(v)),
-            Some(Err(e)) => Err(e),
-            None => {
-                self.source.need_read();
-                Ok(Async::NotReady)
-            }
-        }
-    }
-
-    fn poll_write(&mut self) -> Async<()> {
-        if self.pending.is_some() {
-            return Async::NotReady;
-        }
-
-        self.source.poll_write()
-    }
+    type SinkItem = In;
+    type SinkError = io::Error;
 
     /// Write a message frame to the `FramedIo`
-    fn write(&mut self, req: In) -> Poll<(), io::Error> {
-        if !self.poll_write().is_ready() {
-            panic!("cannot write request when not writable");
-        }
-
+    fn start_send(&mut self, req: In) -> StartSend<In, io::Error> {
         trace!("transport write; frame={:?}", req);
-
+        assert!(self.pending.is_none(), "cannot write request");
         self.pending = Some(req);
-        self.flush()
+        Ok(AsyncSink::Ready)
     }
 
-    fn flush(&mut self) -> Poll<(), io::Error> {
+    fn poll_complete(&mut self) -> Poll<(), io::Error> {
         if !self.source.poll_write().is_ready() {
             return Ok(Async::NotReady)
         }
@@ -226,6 +197,25 @@ impl<In, Out> FramedIo for Transport<In, Out>
 
         self.source.need_write();
         Ok(Async::NotReady)
+    }
+}
+
+impl<In, Out> Stream for Transport<In, Out>
+    where In: fmt::Debug,
+{
+    type Item = Out;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<Out>, io::Error> {
+        match self.source.get_ref().inner.lock().unwrap().recv() {
+            Some(Some(Ok(v))) => Ok(Some(v).into()),
+            Some(Some(Err(e))) => Err(e),
+            Some(None) => Ok(None.into()),
+            None => {
+                self.source.need_read();
+                Ok(Async::NotReady)
+            }
+        }
     }
 }
 
@@ -267,12 +257,12 @@ impl<In, Out> NewTransport<In, Out>
 }
 
 impl<Out> Inner<Out> {
-    fn send(&mut self, v: io::Result<Out>) {
+    fn send(&mut self, v: Option<io::Result<Out>>) {
         self.read_buffer.push(v);
         self.set_readiness();
     }
 
-    fn recv(&mut self) -> Option<io::Result<Out>> {
+    fn recv(&mut self) -> Option<Option<io::Result<Out>>> {
         let ret = shift(&mut self.read_buffer);
         self.set_readiness();
         ret

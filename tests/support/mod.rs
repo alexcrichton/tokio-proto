@@ -3,7 +3,6 @@
 extern crate futures;
 extern crate tokio_service;
 
-use std::marker;
 use std::io;
 
 use self::tokio_service::Service;

@@ -42,7 +42,7 @@ fn test_immediate_done() {
     });
 
     run(service, |mock| {
-        mock.send(pipeline::Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -56,10 +56,10 @@ fn test_immediate_writable_echo() {
 
     run(service, |mock| {
         mock.allow_write();
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
         assert_eq!(mock.next_write().unwrap_msg(), "hello");
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -76,14 +76,14 @@ fn test_immediate_writable_delayed_response_echo() {
 
     run(service, |mock| {
         mock.allow_write();
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
 
         support::sleep_ms(20);
         c.complete(Ok(Message::WithoutBody("goodbye")));
 
         assert_eq!(mock.next_write().unwrap_msg(), "goodbye");
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -96,7 +96,7 @@ fn test_delayed_writable_immediate_response_echo() {
     });
 
     run(service, |mock| {
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
 
         support::sleep_ms(20);
 
@@ -119,13 +119,13 @@ fn test_pipelining_while_service_is_processing() {
         // Allow all the writes
         for _ in 0..3 { mock.allow_write() };
 
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
         let c1 = rx.recv().unwrap();
 
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
         let c2 = rx.recv().unwrap();
 
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
         let c3 = rx.recv().unwrap();
 
         mock.assert_no_write(20);
@@ -153,9 +153,9 @@ fn test_pipelining_while_transport_not_writable() {
     });
 
     run(service, |mock| {
-        mock.send(msg("one"));
-        mock.send(msg("two"));
-        mock.send(msg("three"));
+        mock.send(Some(msg("one")));
+        mock.send(Some(msg("two")));
+        mock.send(Some(msg("three")));
 
         // Assert the service received all the requests before they are written
         // to the transport
@@ -181,7 +181,7 @@ fn test_repeatedly_flushes_messages() {
     });
 
     run(service, |mock| {
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
 
         mock.allow_and_assert_flush();
         mock.allow_and_assert_flush();
@@ -189,7 +189,7 @@ fn test_repeatedly_flushes_messages() {
         mock.allow_write();
         assert_eq!("hello", mock.next_write().unwrap_msg());
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.assert_drop();
     });
 }
@@ -201,14 +201,14 @@ fn test_returning_error_from_service() {
     });
 
     run(service, |mock| {
-        mock.send(msg("hello"));
+        mock.send(Some(msg("hello")));
 
         mock.allow_write();
         assert_eq!(io::ErrorKind::Other, mock.next_write().unwrap_err().kind());
 
         mock.assert_no_write(20);
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.assert_drop();
     });
 }
@@ -220,7 +220,9 @@ fn test_reading_error_frame_from_transport() {
     });
 
     run(service, |mock| {
-        mock.send(Frame::Error { error: io::Error::new(io::ErrorKind::Other, "mock transport error frame") });
+        mock.send(Some(Frame::Error {
+            error: io::Error::new(io::ErrorKind::Other, "mock transport error frame"),
+        }));
         mock.assert_drop();
     });
 }
@@ -268,19 +270,19 @@ fn test_streaming_request_body_then_responding() {
 
     run(service, |mock| {
         mock.allow_write();
-        mock.send(msg_with_body("omg"));
+        mock.send(Some(msg_with_body("omg")));
 
         for i in 0..5 {
-            mock.send(Frame::Body { chunk: Some(i) });
+            mock.send(Some(Frame::Body { chunk: Some(i) }));
             assert_eq!(i, rx.recv().unwrap());
         }
 
         // Send end-of-stream notification
-        mock.send(Frame::Body { chunk: None });
+        mock.send(Some(Frame::Body { chunk: None }));
 
         assert_eq!(mock.next_write().unwrap_msg(), "hi2u");
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -309,19 +311,19 @@ fn test_responding_then_streaming_request_body() {
 
     run(service, |mock| {
         mock.allow_write();
-        mock.send(msg_with_body("omg"));
+        mock.send(Some(msg_with_body("omg")));
 
         assert_eq!(mock.next_write().unwrap_msg(), "hi2u");
 
         for i in 0..5 {
-            mock.send(Frame::Body { chunk: Some(i) });
+            mock.send(Some(Frame::Body { chunk: Some(i) }));
             assert_eq!(i, rx.recv().unwrap());
         }
 
         // Send end-of-stream notification
-        mock.send(Frame::Body { chunk: None });
+        mock.send(Some(Frame::Body { chunk: None }));
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -340,8 +342,8 @@ fn test_pipeline_stream_response_body() {
         mock.allow_write();
         mock.allow_write();
 
-        mock.send(msg("one"));
-        mock.send(pipeline::Frame::Done);
+        mock.send(Some(msg("one")));
+        mock.send(None);
 
         assert_eq!(mock.next_write().unwrap_msg(), "resp");
         assert_eq!(mock.next_write().unwrap_body(), Some(1));
@@ -375,10 +377,10 @@ fn test_pipeline_streaming_body_without_consuming() {
 
     run(service, |mock| {
         mock.allow_write();
-        mock.send(msg_with_body("one"));
+        mock.send(Some(msg_with_body("one")));
 
         for i in 0..5 {
-            mock.send(Frame::Body { chunk: Some(i) });
+            mock.send(Some(Frame::Body { chunk: Some(i) }));
             support::sleep_ms(20);
             assert!(rx.try_recv().is_err());
         }
@@ -386,19 +388,19 @@ fn test_pipeline_streaming_body_without_consuming() {
         assert_eq!(mock.next_write().unwrap_msg(), "resp-one");
 
         // Send the next request
-        mock.send(msg_with_body("two"));
+        mock.send(Some(msg_with_body("two")));
 
         for i in 0..5 {
-            mock.send(Frame::Body { chunk: Some(i) });
+            mock.send(Some(Frame::Body { chunk: Some(i) }));
             assert_eq!(i, rx.recv().unwrap());
         }
 
-        mock.send(Frame::Body { chunk: None });
+        mock.send(Some(Frame::Body { chunk: None }));
 
         mock.allow_write();
         assert_eq!(mock.next_write().unwrap_msg(), "resp-two");
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -421,7 +423,7 @@ fn test_streaming_response_body() {
 
     run(service, |mock| {
         mock.allow_write();
-        mock.send(msg("omg"));
+        mock.send(Some(msg("omg")));
 
         assert_eq!(mock.next_write().unwrap_msg(), "hi2u");
 
@@ -439,7 +441,7 @@ fn test_streaming_response_body() {
         mock.allow_write();
         assert_eq!(None, mock.next_write().unwrap_body());
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
