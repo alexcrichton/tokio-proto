@@ -13,9 +13,8 @@
 use std::io;
 use std::marker;
 
-use futures::stream::Receiver;
-use futures::{self, Future, Async, Poll};
-use tokio_core::io::FramedIo;
+use futures::stream::Empty;
+use futures::{Future, Poll, Stream, Sink, AsyncSink, StartSend};
 use tokio_core::reactor::Handle;
 use tokio_service::Service;
 
@@ -33,58 +32,51 @@ use {Message, Body};
 /// implementation allows sending requests to the transport provided and returns
 /// futures to the responses. All requests are automatically pipelined and
 /// managed internally.
-pub fn connect<F, T>(frames: F, handle: &Handle)
-    -> EasyClient<F::In, T>
-    where F: FramedIo<Out = Option<T>> + 'static,
-          T: 'static,
-          F::In: 'static,
+pub fn connect<S>(frames: S, handle: &Handle)
+                  -> EasyClient<S::SinkItem, S::Item>
+    where S: Stream<Error = io::Error> + Sink<SinkError = io::Error> + 'static,
 {
-    let frames = MyTransport(frames, marker::PhantomData);
     EasyClient {
-        inner: pipeline::connect(futures::finished(frames), handle),
+        inner: pipeline::connect(MyTransport(frames), handle),
     }
 }
 
-// Lifts an implementation of `FramedIo` to `pipeline::Transport` with no bodies
-struct MyTransport<F, T>(F, marker::PhantomData<fn() -> T>);
+struct MyTransport<T>(T);
 
-impl<F, T> pipeline::Transport for MyTransport<F, T>
-    where F: FramedIo<Out = Option<T>> + 'static,
-          T: 'static,
-          F::In: 'static,
-{
-    type In = F::In;
-    type BodyIn = ();
-    type Out = T;
-    type BodyOut = ();
-    type Error = io::Error;
+impl<T: Sink<SinkError = io::Error>> Sink for MyTransport<T> {
+    type SinkItem = pipeline::Frame<T::SinkItem, (), io::Error>;
+    type SinkError = io::Error;
 
-    fn poll_read(&mut self) -> Async<()> {
-        self.0.poll_read()
-    }
-
-    fn read(&mut self) -> Poll<pipeline::Frame<T, (), io::Error>, io::Error> {
-        match try_ready!(self.0.read()) {
-            Some(msg) => {
-                Ok(pipeline::Frame::Message { message: msg, body: false }.into())
+    fn start_send(&mut self, request: Self::SinkItem)
+                  -> StartSend<Self::SinkItem, Self::SinkError> {
+        if let pipeline::Frame::Message { message, body } = request {
+            if !body {
+                match try!(self.0.start_send(message)) {
+                    AsyncSink::Ready => return Ok(AsyncSink::Ready),
+                    AsyncSink::NotReady(msg) => {
+                        let msg = pipeline::Frame::Message { message: msg, body: false };
+                        return Ok(AsyncSink::NotReady(msg))
+                    }
+                }
             }
-            None => Ok(pipeline::Frame::Done.into()),
         }
+        Err(io::Error::new(io::ErrorKind::Other, "no support for streaming"))
     }
 
-    fn poll_write(&mut self) -> Async<()> {
-        self.0.poll_write()
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        self.0.poll_complete()
     }
+}
 
-    fn write(&mut self, req: pipeline::Frame<F::In, (), io::Error>) -> Poll<(), io::Error> {
-        match req {
-            pipeline::Frame::Message { message, .. } => self.0.write(message),
-            _ => panic!("not a message frame"),
-        }
-    }
+impl<T: Stream> Stream for MyTransport<T> {
+    type Item = pipeline::Frame<T::Item, (), io::Error>;
+    type Error = T::Error;
 
-    fn flush(&mut self) -> Poll<(), io::Error> {
-        self.0.flush()
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        let item = try_ready!(self.0.poll());
+        Ok(item.map(|msg| {
+            pipeline::Frame::Message { message: msg, body: false }
+        }).into())
     }
 }
 
@@ -98,22 +90,25 @@ impl<F, T> pipeline::Transport for MyTransport<F, T>
 /// server to help simplify generics and get off the ground running. If
 /// streaming bodies are desired then the top level `pipeline::Server` type can
 /// be used (which this is built on).
-pub struct EasyServer<S, T, I>
-    where S: Service<Request = I, Response = T::In, Error = io::Error> + 'static,
-          T: FramedIo<Out = Option<I>> + 'static,
-          T::In: 'static,
-          I: 'static,
+pub struct EasyServer<S, T>
+    where S: Service<Error = io::Error>,
+          T: Stream<Item = S::Request, Error = io::Error> +
+             Sink<SinkItem = S::Response, SinkError = io::Error> + 'static,
 {
     inner: pipeline::Server<MyService<S>,
-                            MyTransport<T, I>,
-                            Receiver<(), io::Error>>,
+                            MyTransport<T>,
+                            Empty<(), io::Error>,
+                            S::Request,
+                            S::Response,
+                            (),
+                            (),
+                            io::Error>,
 }
 
-impl<S, T, I> EasyServer<S, T, I>
-    where S: Service<Request = I, Response = T::In, Error = io::Error> + 'static,
-          T: FramedIo<Out = Option<I>> + 'static,
-          T::In: 'static,
-          I: 'static,
+impl<S, T> EasyServer<S, T>
+    where S: Service<Error = io::Error>,
+          T: Stream<Item = S::Request, Error = io::Error> +
+             Sink<SinkItem = S::Response, SinkError = io::Error> + 'static,
 {
     /// Instantiates a new pipelined server.
     ///
@@ -121,19 +116,17 @@ impl<S, T, I> EasyServer<S, T, I>
     /// internally drive forward all requests for this given transport. The
     /// `transport` provided is an instance of `FramedIo` where the requests are
     /// dispatched to the `service` provided to get a response to write.
-    pub fn new(service: S, transport: T) -> EasyServer<S, T, I> {
+    pub fn new(service: S, transport: T) -> EasyServer<S, T> {
         EasyServer {
-            inner: pipeline::Server::new(MyService(service),
-                                         MyTransport(transport, marker::PhantomData)),
+            inner: pipeline::Server::new(MyService(service), MyTransport(transport)),
         }
     }
 }
 
-impl<S, T, I> Future for EasyServer<S, T, I>
-    where S: Service<Request = I, Response = T::In, Error = io::Error> + 'static,
-          T: FramedIo<Out = Option<I>> + 'static,
-          T::In: 'static,
-          I: 'static,
+impl<S, T> Future for EasyServer<S, T>
+    where S: Service<Error = io::Error>,
+          T: Stream<Item = S::Request, Error = io::Error> +
+             Sink<SinkItem = S::Response, SinkError = io::Error> + 'static,
 {
     type Item = ();
     type Error = io::Error;
@@ -147,9 +140,9 @@ struct MyService<S>(S);
 
 impl<S: Service> Service for MyService<S> {
     type Request = Message<S::Request, Body<(), io::Error>>;
-    type Response = Message<S::Response, Receiver<(), S::Error>>;
+    type Response = Message<S::Response, Empty<(), S::Error>>;
     type Error = S::Error;
-    type Future = MyFuture<S::Future, Receiver<(), S::Error>>;
+    type Future = MyFuture<S::Future, Empty<(), S::Error>>;
 
     fn call(&self, req: Self::Request) -> Self::Future {
         match req {

@@ -13,9 +13,8 @@
 use std::io;
 use std::marker;
 
-use futures::stream::Receiver;
-use futures::{Future, Async, Poll};
-use tokio_core::io::FramedIo;
+use futures::stream::Empty;
+use futures::{Future, Poll, Stream, Sink, AsyncSink, StartSend};
 use tokio_core::reactor::Handle;
 use tokio_service::Service;
 
@@ -35,8 +34,9 @@ use {Message, Body};
 /// managed internally.
 pub fn connect<F, T, U>(frames: F, handle: &Handle)
     -> EasyClient<U, T>
-    where F: FramedIo<In = (RequestId, U),
-                      Out = Option<(RequestId, T)>> + 'static,
+    where F: Stream<Item = (RequestId, T), Error = io::Error> +
+             Sink<SinkItem = (RequestId, U), SinkError = io::Error> +
+             'static,
           T: 'static,
           U: 'static,
 {
@@ -59,57 +59,67 @@ impl<F, T, U> MyTransport<F, T, U> {
     }
 }
 
-impl<F, T, U> multiplex::Transport for MyTransport<F, T, U>
-    where F: FramedIo<In = (RequestId, U),
-                      Out = Option<(RequestId, T)>> + 'static,
-          T: 'static,
-          U: 'static,
+// This is just a `sink.with` to transform a multiplex frame to our own frame,
+// but we can name it.
+impl<F, T, U> Sink for MyTransport<F, T, U>
+    where F: Sink<SinkItem = (RequestId, U), SinkError = io::Error>,
 {
-    type In = U;
-    type BodyIn = ();
-    type Out = T;
-    type BodyOut = ();
-    type Error = io::Error;
+    type SinkItem = multiplex::Frame<U, (), io::Error>;
+    type SinkError = io::Error;
 
-    fn poll_read(&mut self) -> Async<()> {
-        self.inner.poll_read()
-    }
-
-    fn read(&mut self) -> Poll<multiplex::Frame<T, (), io::Error>, io::Error> {
-        let (id, msg) = match try_ready!(self.inner.read()) {
-            Some(msg) => msg,
-            None => return Ok(multiplex::Frame::Done.into()),
-        };
-        Ok(multiplex::Frame::Message {
-            message: msg,
-            body: false,
-            solo: false,
-            id: id,
-        }.into())
-    }
-
-    fn poll_write(&mut self) -> Async<()> {
-        self.inner.poll_write()
-    }
-
-    fn write(&mut self, req: multiplex::Frame<U, (), io::Error>) -> Poll<(), io::Error> {
-        match req {
+    fn start_send(&mut self, request: Self::SinkItem)
+                  -> StartSend<Self::SinkItem, Self::SinkError> {
+        match request {
             multiplex::Frame::Message {
                 message,
                 id,
                 body,
                 solo,
             } => {
-                assert!(!body, "no bodies allowed");
-                assert!(!solo, "solo not supported in easy mode");
-                self.inner.write((id, message))
+                if !body && !solo {
+                    match try!(self.inner.start_send((id, message))) {
+                        AsyncSink::Ready => return Ok(AsyncSink::Ready),
+                        AsyncSink::NotReady((id, msg)) => {
+                            let msg = multiplex::Frame::Message {
+                                message: msg,
+                                id: id,
+                                body: false,
+                                solo: false,
+                            };
+                            return Ok(AsyncSink::NotReady(msg))
+                        }
+                    }
+                }
             }
-            _ => panic!("not a message frame"),
+            _ => {}
         }
+        Err(io::Error::new(io::ErrorKind::Other, "no support for streaming"))
     }
 
-    fn flush(&mut self) -> Poll<(), io::Error> {
-        self.inner.flush()
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        self.inner.poll_complete()
+    }
+}
+
+// This is just a `stream.map` to transform our frames into multiplex frames
+// but we can name it.
+impl<F, T, U> Stream for MyTransport<F, T, U>
+    where F: Stream<Item = (RequestId, T), Error = io::Error>,
+{
+    type Item = multiplex::Frame<T, (), io::Error>;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        let (id, msg) = match try_ready!(self.inner.poll()) {
+            Some(msg) => msg,
+            None => return Ok(None.into()),
+        };
+        Ok(Some(multiplex::Frame::Message {
+            message: msg,
+            body: false,
+            solo: false,
+            id: id,
+        }).into())
     }
 }
 
@@ -123,24 +133,25 @@ impl<F, T, U> multiplex::Transport for MyTransport<F, T, U>
 /// server to help simplify generics and get off the ground running. If
 /// streaming bodies are desired then the top level `multiplex::Server` type can
 /// be used (which this is built on).
-pub struct EasyServer<S, T, Out, In>
-    where S: Service<Request = Out, Response = In, Error = io::Error> + 'static,
-          T: FramedIo<In = (RequestId, In),
-                      Out = Option<(RequestId, Out)>> + 'static,
-          In: 'static,
-          Out: 'static,
+pub struct EasyServer<S, T>
+    where S: Service<Error = io::Error>,
+          T: Stream<Item = (RequestId, S::Request), Error = io::Error> +
+             Sink<SinkItem = (RequestId, S::Response), SinkError = io::Error>,
 {
     inner: multiplex::Server<MyService<S>,
-                             MyTransport<T, Out, In>,
-                             Receiver<(), io::Error>>,
+                             MyTransport<T, S::Request, S::Response>,
+                             Empty<(), io::Error>,
+                             S::Request,
+                             S::Response,
+                             (),
+                             (),
+                             io::Error>,
 }
 
-impl<S, T, Out, In> EasyServer<S, T, Out, In>
-    where S: Service<Request = Out, Response = In, Error = io::Error> + 'static,
-          T: FramedIo<In = (RequestId, In),
-                      Out = Option<(RequestId, Out)>> + 'static,
-          In: 'static,
-          Out: 'static,
+impl<S, T> EasyServer<S, T>
+    where S: Service<Error = io::Error>,
+          T: Stream<Item = (RequestId, S::Request), Error = io::Error> +
+             Sink<SinkItem = (RequestId, S::Response), SinkError = io::Error>,
 {
     /// Instantiates a new multiplexed server.
     ///
@@ -148,7 +159,7 @@ impl<S, T, Out, In> EasyServer<S, T, Out, In>
     /// internally drive forward all requests for this given transport. The
     /// `transport` provided is an instance of `FramedIo` where the requests are
     /// dispatched to the `service` provided to get a response to write.
-    pub fn new(service: S, transport: T) -> EasyServer<S, T, Out, In> {
+    pub fn new(service: S, transport: T) -> EasyServer<S, T> {
         EasyServer {
             inner: multiplex::Server::new(MyService(service),
                                           MyTransport::new(transport)),
@@ -156,12 +167,10 @@ impl<S, T, Out, In> EasyServer<S, T, Out, In>
     }
 }
 
-impl<S, T, Out, In> Future for EasyServer<S, T, Out, In>
-    where S: Service<Request = Out, Response = In, Error = io::Error> + 'static,
-          T: FramedIo<In = (RequestId, In),
-                      Out = Option<(RequestId, Out)>> + 'static,
-          In: 'static,
-          Out: 'static,
+impl<S, T> Future for EasyServer<S, T>
+    where S: Service<Error = io::Error>,
+          T: Stream<Item = (RequestId, S::Request), Error = io::Error> +
+             Sink<SinkItem = (RequestId, S::Response), SinkError = io::Error>,
 {
     type Item = ();
     type Error = ();
@@ -175,9 +184,9 @@ struct MyService<S>(S);
 
 impl<S: Service> Service for MyService<S> {
     type Request = Message<S::Request, Body<(), io::Error>>;
-    type Response = Message<S::Response, Receiver<(), S::Error>>;
+    type Response = Message<S::Response, Empty<(), S::Error>>;
     type Error = S::Error;
-    type Future = MyFuture<S::Future, Receiver<(), S::Error>>;
+    type Future = MyFuture<S::Future, Empty<(), S::Error>>;
 
     fn call(&self, req: Self::Request) -> Self::Future {
         match req {

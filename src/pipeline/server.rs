@@ -1,8 +1,7 @@
-use {Message, Body};
-use super::{pipeline, Transport, Pipeline, PipelineMessage};
+use {Message, Body, Error};
+use super::{pipeline, Frame, Pipeline, PipelineMessage};
 use tokio_service::Service;
-use futures::{Future, Poll, Async};
-use futures::stream::Stream;
+use futures::{Future, Poll, Async, Stream, Sink};
 use std::collections::VecDeque;
 use std::io;
 
@@ -13,17 +12,27 @@ use std::io;
 
 /// A server `Task` that dispatches `Transport` messages to a `Service` using
 /// protocol pipelining.
-pub struct Server<S, T, B>
-    where T: Transport,
-          S: Service<Request = Message<T::Out, Body<T::BodyOut, T::Error>>,
-                    Response = Message<T::In, B>,
-                       Error = T::Error> + 'static,
-          B: Stream<Item = T::BodyIn, Error = T::Error> + 'static,
+pub struct Server<S, T, B, M1, M2, B1, B2, E>
+    where S: Service<Request = Message<M1, Body<B1, E>>,
+                     Response = Message<M2, B>,
+                     Error = E>,
+          B: Stream<Item = B2, Error = E>,
+          T: Sink<SinkItem = Frame<M2, B2, E>, SinkError = io::Error> +
+             Stream<Item = Frame<M1, B1, E>, Error = io::Error>,
+          E: From<Error<E>>,
 {
-    inner: Pipeline<Dispatch<S, T>>,
+    inner: Pipeline<Dispatch<S, T, B, M1, M2, B1, B2, E>>,
 }
 
-struct Dispatch<S, T> where S: Service {
+struct Dispatch<S, T, B, M1, M2, B1, B2, E>
+    where S: Service<Request = Message<M1, Body<B1, E>>,
+                     Response = Message<M2, B>,
+                     Error = E>,
+          B: Stream<Item = B2, Error = E>,
+          T: Sink<SinkItem = Frame<M2, B2, E>, SinkError = io::Error> +
+             Stream<Item = Frame<M1, B1, E>, Error = io::Error>,
+          E: From<Error<E>>,
+{
     // The service handling the connection
     service: S,
     transport: T,
@@ -35,16 +44,18 @@ enum InFlight<F: Future> {
     Done(Result<F::Item, F::Error>),
 }
 
-impl<S, T, B> Server<S, T, B>
-    where T: Transport,
-          S: Service<Request = Message<T::Out, Body<T::BodyOut, T::Error>>,
-                    Response = Message<T::In, B>,
-                       Error = T::Error> + 'static,
-          B: Stream<Item = T::BodyIn, Error = T::Error>,
+impl<S, T, B, M1, M2, B1, B2, E> Server<S, T, B, M1, M2, B1, B2, E>
+    where S: Service<Request = Message<M1, Body<B1, E>>,
+                     Response = Message<M2, B>,
+                     Error = E>,
+          B: Stream<Item = B2, Error = E>,
+          T: Sink<SinkItem = Frame<M2, B2, E>, SinkError = io::Error> +
+             Stream<Item = Frame<M1, B1, E>, Error = io::Error>,
+          E: From<Error<E>>,
 {
     /// Create a new pipeline `Server` dispatcher with the given service and
     /// transport
-    pub fn new(service: S, transport: T) -> Server<S, T, B> {
+    pub fn new(service: S, transport: T) -> Server<S, T, B, M1, M2, B1, B2, E> {
         let dispatch = Dispatch {
             service: service,
             transport: transport,
@@ -59,18 +70,20 @@ impl<S, T, B> Server<S, T, B>
     }
 }
 
-impl<S, T, B> pipeline::Dispatch for Dispatch<S, T>
-    where T: Transport,
-          S: Service<Request = Message<T::Out, Body<T::BodyOut, T::Error>>,
-                    Response = Message<T::In, B>,
-                       Error = T::Error> + 'static,
-          B: Stream<Item = T::BodyIn, Error = T::Error> + 'static,
+impl<S, T, B, M1, M2, B1, B2, E> pipeline::Dispatch for Dispatch<S, T, B, M1, M2, B1, B2, E>
+    where S: Service<Request = Message<M1, Body<B1, E>>,
+                     Response = Message<M2, B>,
+                     Error = E>,
+          B: Stream<Item = B2, Error = E>,
+          T: Sink<SinkItem = Frame<M2, B2, E>, SinkError = io::Error> +
+             Stream<Item = Frame<M1, B1, E>, Error = io::Error>,
+          E: From<Error<E>>,
 {
-    type In = T::In;
-    type BodyIn = T::BodyIn;
-    type Out = T::Out;
-    type BodyOut = T::BodyOut;
-    type Error = T::Error;
+    type In = M2;
+    type BodyIn = B2;
+    type Out = M1;
+    type BodyOut = B1;
+    type Error = E;
     type Stream = B;
     type Transport = T;
 
@@ -129,12 +142,14 @@ impl<F: Future> InFlight<F> {
     }
 }
 
-impl<S, T, B> Future for Server<S, T, B>
-    where T: Transport,
-          S: Service<Request = Message<T::Out, Body<T::BodyOut, T::Error>>,
-                    Response = Message<T::In, B>,
-                       Error = T::Error> + 'static,
-          B: Stream<Item = T::BodyIn, Error = T::Error>,
+impl<S, T, B, M1, M2, B1, B2, E> Future for Server<S, T, B, M1, M2, B1, B2, E>
+    where S: Service<Request = Message<M1, Body<B1, E>>,
+                     Response = Message<M2, B>,
+                     Error = E>,
+          B: Stream<Item = B2, Error = E>,
+          T: Sink<SinkItem = Frame<M2, B2, E>, SinkError = io::Error> +
+             Stream<Item = Frame<M1, B1, E>, Error = io::Error>,
+          E: From<Error<E>>,
 {
     type Item = ();
     type Error = io::Error;

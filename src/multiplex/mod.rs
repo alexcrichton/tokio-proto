@@ -39,11 +39,6 @@ pub use self::multiplex::{Multiplex, MultiplexMessage, Dispatch};
 pub use self::client::connect;
 pub use self::server::Server;
 
-use {Error};
-use tokio_core::io::FramedIo;
-use futures::{Async, Poll};
-use std::{io};
-
 /// Identifies a request / response thread
 pub type RequestId = u64;
 
@@ -78,44 +73,6 @@ pub enum Frame<T, B, E> {
         /// Error value
         error: E,
     },
-    /// Final frame sent in each transport direction
-    Done,
-}
-
-/// A specialization of `io::Transport` supporting the requirements of
-/// pipeline based protocols.
-///
-/// `io::Transport` should be implemented instead of this trait.
-pub trait Transport: 'static {
-    /// Messages written to the transport
-    type In: 'static;
-
-    /// Inbound body frame
-    type BodyIn: 'static;
-
-    /// Messages read from the transport
-    type Out: 'static;
-
-    /// Outbound body frame
-    type BodyOut: 'static;
-
-    /// Transport error
-    type Error: From<Error<Self::Error>> + 'static;
-
-    /// Tests to see if this Transport may be readable.
-    fn poll_read(&mut self) -> Async<()>;
-
-    /// Read a message from the `Transport`
-    fn read(&mut self) -> Poll<Frame<Self::Out, Self::BodyOut, Self::Error>, io::Error>;
-
-    /// Tests to see if this I/O object may be writable.
-    fn poll_write(&mut self) -> Async<()>;
-
-    /// Write a message to the `Transport`
-    fn write(&mut self, req: Frame<Self::In, Self::BodyIn, Self::Error>) -> Poll<(), io::Error>;
-
-    /// Flush pending writes to the socket
-    fn flush(&mut self) -> Poll<(), io::Error>;
 }
 
 /*
@@ -131,7 +88,6 @@ impl<T, B, E> Frame<T, B, E> {
             Frame::Message { id, .. } => Some(id),
             Frame::Body { id, .. } => Some(id),
             Frame::Error { id, .. } => Some(id),
-            Frame::Done => None,
         }
     }
 
@@ -141,7 +97,6 @@ impl<T, B, E> Frame<T, B, E> {
             Frame::Message { message, .. } => message,
             Frame::Body { .. } => panic!("called `Frame::unwrap_msg()` on a `Body` value"),
             Frame::Error { .. } => panic!("called `Frame::unwrap_msg()` on an `Error` value"),
-            Frame::Done => panic!("called `Frame::unwrap_msg()` on a `Done` value"),
         }
     }
 
@@ -151,7 +106,6 @@ impl<T, B, E> Frame<T, B, E> {
             Frame::Body { chunk, .. } => chunk,
             Frame::Message { .. } => panic!("called `Frame::unwrap_body()` on a `Message` value"),
             Frame::Error { .. } => panic!("called `Frame::unwrap_body()` on an `Error` value"),
-            Frame::Done => panic!("called `Frame::unwrap_body()` on a `Done` value"),
         }
     }
 
@@ -161,124 +115,6 @@ impl<T, B, E> Frame<T, B, E> {
             Frame::Error { error, .. } => error,
             Frame::Body { .. } => panic!("called `Frame::unwrap_err()` on a `Body` value"),
             Frame::Message { .. } => panic!("called `Frame::unwrap_err()` on a `Message` value"),
-            Frame::Done => panic!("called `Frame::unwrap_message()` on a `Done` value"),
         }
-    }
-
-    /// Returns true if the frame is `Frame::Done`
-    pub fn is_done(&self) -> bool {
-        match *self {
-            Frame::Done => true,
-            _ => false,
-        }
-    }
-}
-
-/*
- *
- * ===== impl Transport =====
- *
- */
-
-impl<T, M1, M2, B1, B2, E> Transport for T
-    where T: FramedIo<In = Frame<M1, B1, E>, Out = Frame<M2, B2, E>> + 'static,
-          E: From<Error<E>> + 'static,
-          M1: 'static,
-          M2: 'static,
-          B1: 'static,
-          B2: 'static,
-{
-    type In = M1;
-    type BodyIn = B1;
-    type Out = M2;
-    type BodyOut = B2;
-    type Error = E;
-
-    fn poll_read(&mut self) -> Async<()> {
-        FramedIo::poll_read(self)
-    }
-
-    fn read(&mut self) -> Poll<Frame<M2, B2, E>, io::Error> {
-        FramedIo::read(self)
-    }
-
-    fn poll_write(&mut self) -> Async<()> {
-        FramedIo::poll_write(self)
-    }
-
-    fn write(&mut self, req: Frame<M1, B1, E>) -> Poll<(), io::Error> {
-        FramedIo::write(self, req)
-    }
-
-    fn flush(&mut self) -> Poll<(), io::Error> {
-        FramedIo::flush(self)
-    }
-}
-
-impl<M1, M2, B1, B2, E> Transport for Box<Transport<In = M1, Out = M2, BodyIn = B1, BodyOut = B2, Error = E>>
-    where E: From<Error<E>> + 'static,
-          M1: 'static,
-          M2: 'static,
-          B1: 'static,
-          B2: 'static,
-{
-    type In = M1;
-    type BodyIn = B1;
-    type Out = M2;
-    type BodyOut = B2;
-    type Error = E;
-
-    fn poll_read(&mut self) -> Async<()> {
-        (**self).poll_read()
-    }
-
-    fn read(&mut self) -> Poll<Frame<M2, B2, E>, io::Error> {
-        (**self).read()
-    }
-
-    fn poll_write(&mut self) -> Async<()> {
-        (**self).poll_write()
-    }
-
-    fn write(&mut self, req: Frame<M1, B1, E>) -> Poll<(), io::Error> {
-        (**self).write(req)
-    }
-
-    fn flush(&mut self) -> Poll<(), io::Error> {
-        (**self).flush()
-    }
-}
-
-impl<M1, M2, B1, B2, E> Transport for Box<Transport<In = M1, Out = M2, BodyIn = B1, BodyOut = B2, Error = E> + Send>
-    where E: From<Error<E>> + 'static,
-          M1: 'static,
-          M2: 'static,
-          B1: 'static,
-          B2: 'static,
-{
-    type In = M1;
-    type BodyIn = B1;
-    type Out = M2;
-    type BodyOut = B2;
-    type Error = E;
-
-    fn poll_read(&mut self) -> Async<()> {
-        (**self).poll_read()
-    }
-
-    fn read(&mut self) -> Poll<Frame<M2, B2, E>, io::Error> {
-        (**self).read()
-    }
-
-    fn poll_write(&mut self) -> Async<()> {
-        (**self).poll_write()
-    }
-
-    fn write(&mut self, req: Frame<M1, B1, E>) -> Poll<(), io::Error> {
-        (**self).write(req)
-    }
-
-    fn flush(&mut self) -> Poll<(), io::Error> {
-        (**self).flush()
     }
 }

@@ -1,62 +1,70 @@
 use {Error, Body, Message};
-use super::{Transport};
 use super::pipeline::{self, Pipeline, PipelineMessage};
+use super::Frame;
 use client::{self, Client, Receiver};
-use futures::stream::Stream;
-use futures::{Future, IntoFuture, Complete, Poll, Async};
+use futures::{Future, Poll, Async, Stream, Sink};
+use futures::sync::oneshot;
 use tokio_core::reactor::Handle;
 use std::collections::VecDeque;
 use std::io;
 
-struct Dispatch<T, B>
-    where T: Transport,
-          B: Stream<Item = T::BodyIn, Error = T::Error>,
+struct Dispatch<T, M1, M2, B2, B, E>
+    where E: From<Error<E>>,
 {
     transport: T,
-    requests: Receiver<T::In, T::Out, B, Body<T::BodyOut, T::Error>, T::Error>,
-    in_flight: VecDeque<Complete<Result<Message<T::Out, Body<T::BodyOut, T::Error>>, T::Error>>>,
+    requests: Receiver<M1, M2, B, Body<B2, E>, E>,
+    in_flight: VecDeque<oneshot::Sender<Result<Message<M2, Body<B2, E>>, E>>>,
 }
 
 /// Connect to the given `addr` and handle using the given Transport and protocol pipelining.
-pub fn connect<T, F, B>(new_transport: F, handle: &Handle)
-    -> Client<T::In, T::Out, B, Body<T::BodyOut, T::Error>, T::Error>
-    where F: IntoFuture<Item = T, Error = io::Error> + 'static,
-          T: Transport,
-          B: Stream<Item = T::BodyIn, Error = T::Error> + 'static,
+pub fn connect<T, M1, B1, M2, B2, B, E>(transport: T, handle: &Handle)
+    -> Client<M1, M2, B, Body<B2, E>, E>
+    where T: Stream<Item = Frame<M2, B2, E>, Error = io::Error> +
+             Sink<SinkItem = Frame<M1, B1, E>, SinkError = io::Error> +
+             'static,
+          E: From<Error<E>> + 'static,
+          B: Stream<Item = B1, Error = E> + 'static,
+          M1: 'static,
+          B1: 'static,
+          M2: 'static,
+          B2: 'static,
 {
     let (client, rx) = client::pair();
 
-    let task = new_transport.into_future()
-        .and_then(move |transport| {
-            let dispatch: Dispatch<T, B> = Dispatch {
-                transport: transport,
-                requests: rx,
-                in_flight: VecDeque::with_capacity(32),
-            };
-
-            Pipeline::new(dispatch)
-        })
-        .map_err(|e| {
-            // TODO: where to punt this error to?
-            error!("pipeline error: {}", e);
-        });
+    let dispatch = Dispatch {
+        transport: transport,
+        requests: rx,
+        in_flight: VecDeque::with_capacity(32),
+    };
+    let srv = Pipeline::new(dispatch);
 
     // Spawn the task
-    handle.spawn(task);
+    handle.spawn(srv.map_err(|e| {
+        // TODO: where to punt this error to?
+        error!("pipeline error: {}", e);
+    }));
 
     // Return the client
     client
 }
 
-impl<T, B> pipeline::Dispatch for Dispatch<T, B>
-    where T: Transport,
-          B: Stream<Item = T::BodyIn, Error = T::Error> + 'static,
+impl<T, M1, B1, M2, B2, B, E> pipeline::Dispatch for Dispatch<T, M1, M2, B2, B, E>
+    where T: Stream<Item = Frame<M2, B2, E>, Error = io::Error> +
+             Sink<SinkItem = Frame<M1, B1, E>, SinkError = io::Error> +
+             'static,
+          E: From<Error<E>> + 'static,
+          B: Stream<Item = B1, Error = E>,
+          M1: 'static,
+          B1: 'static,
+          M2: 'static,
+          B2: 'static,
+          B: 'static,
 {
-    type In = T::In;
-    type BodyIn = T::BodyIn;
-    type Out = T::Out;
-    type BodyOut = T::BodyOut;
-    type Error = T::Error;
+    type In = M1;
+    type BodyIn = B1;
+    type Out = M2;
+    type BodyOut = B2;
+    type Error = E;
     type Stream = B;
     type Transport = T;
 
@@ -110,9 +118,8 @@ impl<T, B> pipeline::Dispatch for Dispatch<T, B>
     }
 }
 
-impl<T, B> Drop for Dispatch<T, B>
-    where T: Transport,
-          B: Stream<Item = T::BodyIn, Error = T::Error>,
+impl<T, M1, M2, B2, B, E> Drop for Dispatch<T, M1, M2, B2, B, E>
+    where E: From<Error<E>>,
 {
     fn drop(&mut self) {
         // Complete any pending requests with an error
