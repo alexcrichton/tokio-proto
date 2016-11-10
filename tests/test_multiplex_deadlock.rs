@@ -14,9 +14,8 @@ use support::multiplex as mux;
 use support::FnService;
 
 use tokio_proto::Message;
-use tokio_proto::multiplex::{self, Frame};
-use futures::{stream, Async, Poll};
-use std::io;
+use futures::{Poll, Stream, Sink, StartSend, AsyncSink};
+use futures::stream;
 
 #[test]
 fn test_write_requires_flush() {
@@ -24,12 +23,12 @@ fn test_write_requires_flush() {
     // Create a custom Transport middleware that requires a flush before
     // enabling reading
 
-    struct Transport<T: multiplex::Transport> {
+    struct Transport<T: Sink> {
         upstream: T,
-        buffer: Option<Frame<T::In, T::BodyIn, T::Error>>,
+        buffer: Option<T::SinkItem>,
     }
 
-    impl<T: multiplex::Transport> Transport<T> {
+    impl<T: Sink> Transport<T> {
         fn new(upstream: T) -> Transport<T> {
             Transport {
                 upstream: upstream,
@@ -38,48 +37,36 @@ fn test_write_requires_flush() {
         }
     }
 
-    impl<T> multiplex::Transport for Transport<T>
-        where T: multiplex::Transport,
-    {
-        type In = T::In;
-        type Out = T::Out;
-        type BodyIn = T::BodyIn;
-        type BodyOut = T::BodyOut;
+    impl<T: Stream + Sink> Stream for Transport<T> {
+        type Item = T::Item;
         type Error = T::Error;
 
-        fn poll_read(&mut self) -> Async<()> {
-            self.upstream.poll_read()
+        fn poll(&mut self) -> Poll<Option<T::Item>, T::Error> {
+            self.upstream.poll()
+        }
+    }
+
+    impl<T: Sink> Sink for Transport<T> {
+        type SinkItem = T::SinkItem;
+        type SinkError = T::SinkError;
+
+        fn start_send(&mut self, msg: T::SinkItem)
+                      -> StartSend<T::SinkItem, T::SinkError> {
+            assert!(self.buffer.is_none());
+            self.buffer = Some(msg);
+            Ok(AsyncSink::Ready)
         }
 
-        fn read(&mut self) -> Poll<Frame<Self::Out, Self::BodyOut, Self::Error>, io::Error> {
-            self.upstream.read()
-        }
-
-        fn poll_write(&mut self) -> Async<()> {
-            if self.buffer.is_none() {
-                return Async::Ready(());
-            }
-
-            Async::NotReady
-        }
-
-        fn write(&mut self, message: Frame<Self::In, Self::BodyIn, Self::Error>) -> Poll<(), io::Error> {
-            assert!(self.poll_write().is_ready());
-            self.buffer = Some(message);
-            Ok(Async::Ready(()))
-        }
-
-        fn flush(&mut self) -> Poll<(), io::Error> {
+        fn poll_complete(&mut self) -> Poll<(), T::SinkError> {
             if self.buffer.is_some() {
-                if !self.upstream.poll_write().is_ready() {
-                    return Ok(Async::NotReady);
-                }
-
                 let msg = self.buffer.take().unwrap();
-                try!(self.upstream.write(msg));
+                match try!(self.upstream.start_send(msg)) {
+                    AsyncSink::Ready => {}
+                    AsyncSink::NotReady(_) => panic!("upstream not ready"),
+                }
             }
 
-            self.upstream.flush()
+            self.upstream.poll_complete()
         }
     }
 
@@ -96,7 +83,7 @@ fn test_write_requires_flush() {
     // Expect a ping pong
     mux::run_with_transport(service, Transport::new, |mock| {
         mock.allow_write();
-        mock.send(mux::message(0, "hello"));
+        mock.send(Some(mux::message(0, "hello")));
 
         let wr = mock.next_write();
         assert_eq!(wr.request_id(), Some(0));
@@ -114,7 +101,7 @@ fn test_write_requires_flush() {
         assert_eq!(wr.request_id(), Some(0));
         assert_eq!(wr.unwrap_body(), None);
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }

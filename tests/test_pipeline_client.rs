@@ -43,10 +43,10 @@ fn test_ping_pong_close() {
         let pong = service.call(Message::WithoutBody("ping"));
         assert_eq!("ping", mock.next_write().unwrap_msg());
 
-        mock.send(msg("pong"));
+        mock.send(Some(msg("pong")));
         assert_eq!("pong", pong.wait().unwrap().into_inner());
 
-        mock.send(pipeline::Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -55,7 +55,7 @@ fn test_ping_pong_close() {
 #[ignore]
 fn test_response_ready_before_request_sent() {
     run(|mock, service| {
-        mock.send(msg("pong"));
+        mock.send(Some(msg("pong")));
 
         support::sleep_ms(20);
 
@@ -85,10 +85,10 @@ fn test_streaming_request_body() {
         drop(tx);
         assert_eq!(None, mock.next_write().unwrap_body());
 
-        mock.send(msg("pong"));
+        mock.send(Some(msg("pong")));
         assert_eq!("pong", pong.wait().unwrap().into_inner());
 
-        mock.send(pipeline::Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -118,7 +118,7 @@ fn run<F>(f: F) where F: FnOnce(TransportHandle, Client) {
         let (mock, new_transport) = mock::transport::<Frame, Frame>(handle.clone());
 
         let transport = new_transport.new_transport().unwrap();
-        let service = pipeline::connect(Ok(transport), &handle);
+        let service = pipeline::connect(transport, &handle);
 
         tx2.send((mock, service)).unwrap();
         lp.run(rx)

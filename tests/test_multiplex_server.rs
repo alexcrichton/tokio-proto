@@ -31,7 +31,7 @@ fn test_immediate_done() {
     });
 
     mux::run(service, |mock| {
-        mock.send(mux::done());
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -45,13 +45,13 @@ fn test_immediate_writable_echo() {
 
     mux::run(service, |mock| {
         mock.allow_write();
-        mock.send(mux::message(0, "hello"));
+        mock.send(Some(mux::message(0, "hello")));
 
         let wr = mock.next_write();
         assert_eq!(wr.request_id(), Some(0));
         assert_eq!(wr.unwrap_msg(), "goodbye");
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -68,7 +68,7 @@ fn test_immediate_writable_delayed_response_echo() {
 
     mux::run(service, |mock| {
         mock.allow_write();
-        mock.send(mux::message(0, "hello"));
+        mock.send(Some(mux::message(0, "hello")));
 
         support::sleep_ms(20);
         c.complete(Ok(Message::WithoutBody("goodbye")));
@@ -77,7 +77,7 @@ fn test_immediate_writable_delayed_response_echo() {
         assert_eq!(wr.request_id(), Some(0));
         assert_eq!(wr.unwrap_msg(), "goodbye");
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -90,7 +90,7 @@ fn test_delayed_writable_immediate_response_echo() {
     });
 
     mux::run(service, |mock| {
-        mock.send(mux::message(0, "hello"));
+        mock.send(Some(mux::message(0, "hello")));
 
         support::sleep_ms(20);
 
@@ -117,13 +117,13 @@ fn test_same_order_multiplexing() {
         // Allow all the writes
         for _ in 0..3 { mock.allow_write() };
 
-        mock.send(mux::message(0, "hello"));
+        mock.send(Some(mux::message(0, "hello")));
         let c1 = rx.recv().unwrap();
 
-        mock.send(mux::message(1, "hello"));
+        mock.send(Some(mux::message(1, "hello")));
         let c2 = rx.recv().unwrap();
 
-        mock.send(mux::message(2, "hello"));
+        mock.send(Some(mux::message(2, "hello")));
         let c3 = rx.recv().unwrap();
 
         mock.assert_no_write(20);
@@ -165,13 +165,13 @@ fn test_out_of_order_multiplexing() {
         // Allow all the writes
         for _ in 0..3 { mock.allow_write() };
 
-        mock.send(mux::message(0, "hello"));
+        mock.send(Some(mux::message(0, "hello")));
         let c1 = rx.recv().unwrap();
 
-        mock.send(mux::message(1, "hello"));
+        mock.send(Some(mux::message(1, "hello")));
         let c2 = rx.recv().unwrap();
 
-        mock.send(mux::message(2, "hello"));
+        mock.send(Some(mux::message(2, "hello")));
         let c3 = rx.recv().unwrap();
 
         mock.assert_no_write(20);
@@ -207,9 +207,9 @@ fn test_multiplexing_while_transport_not_writable() {
     });
 
     mux::run(service, |mock| {
-        mock.send(mux::message(0, "one"));
-        mock.send(mux::message(1, "two"));
-        mock.send(mux::message(2, "three"));
+        mock.send(Some(mux::message(0, "one")));
+        mock.send(Some(mux::message(1, "two")));
+        mock.send(Some(mux::message(2, "three")));
 
         // Assert the service received all the requests before they are written
         // to the transport
@@ -236,7 +236,7 @@ fn test_repeatedly_flushes_messages() {
     });
 
     mux::run(service, |mock| {
-        mock.send(mux::message(0, "hello"));
+        mock.send(Some(mux::message(0, "hello")));
 
         mock.allow_and_assert_flush();
         mock.allow_and_assert_flush();
@@ -244,7 +244,7 @@ fn test_repeatedly_flushes_messages() {
         mock.allow_write();
         assert_eq!("goodbye", mock.next_write().unwrap_msg());
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.assert_drop();
     });
 }
@@ -273,7 +273,7 @@ fn test_reaching_max_in_flight_requests() {
             let (c, resp) = oneshot();
             tx.send(resp).unwrap();
             responses.push((i, c));
-            mock.send(mux::message(i, "request"));
+            mock.send(Some(mux::message(i, "request")));
         }
 
         // wait a bit
@@ -316,7 +316,7 @@ fn test_reaching_max_in_flight_requests() {
             assert_eq!("zomg", wr.unwrap_msg());
         }
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.assert_drop();
     });
 }
@@ -335,7 +335,7 @@ fn test_basic_streaming_response_body() {
 
     mux::run(service, |mock| {
         mock.allow_write();
-        mock.send(mux::message(3, "want-body"));
+        mock.send(Some(mux::message(3, "want-body")));
 
         let wr = mock.next_write();
         assert_eq!(Some(3), wr.request_id());
@@ -368,7 +368,7 @@ fn test_basic_streaming_response_body() {
         assert_eq!(None, wr.unwrap_body());
 
         // Alright, clean shutdown
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -394,28 +394,28 @@ fn test_basic_streaming_request_body_read_then_respond() {
 
     mux::run(service, |mock| {
         mock.allow_write();
-        mock.send(mux::message_with_body(2, "have-body"));
+        mock.send(Some(mux::message_with_body(2, "have-body")));
 
         for i in 0..5 {
             // No write yet
             mock.assert_no_write(20);
 
             // Send a body chunk
-            mock.send(Frame::Body { id: 2, chunk: Some(i) });
+            mock.send(Some(Frame::Body { id: 2, chunk: Some(i) }));
 
             // Assert service processed chunk
             assert_eq!(i, rx.recv().unwrap());
         }
 
         // Send end-of-stream notification
-        mock.send(Frame::Body { id: 2, chunk: None });
+        mock.send(Some(Frame::Body { id: 2, chunk: None }));
 
         let wr = mock.next_write();
         assert_eq!(Some(2), wr.request_id());
         assert_eq!("hi2u", wr.unwrap_msg());
 
         // Clean shutdown
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -442,8 +442,8 @@ fn test_interleaving_request_body_chunks() {
     });
 
     mux::run(service, |mock| {
-        mock.send(mux::message_with_body(2, "have-body-0"));
-        mock.send(mux::message_with_body(4, "have-body-1"));
+        mock.send(Some(mux::message_with_body(2, "have-body-0")));
+        mock.send(Some(mux::message_with_body(4, "have-body-1")));
 
         // The write must be allowed in order to process the bodies
         mock.allow_write();
@@ -454,40 +454,40 @@ fn test_interleaving_request_body_chunks() {
                 mock.assert_no_write(20);
 
                 // Send a body chunk
-                mock.send(Frame::Body { id: 2, chunk: Some(i) });
+                mock.send(Some(Frame::Body { id: 2, chunk: Some(i) }));
                 assert_eq!((0, i), rx.recv().unwrap());
 
-                mock.send(Frame::Body { id: 4, chunk: Some(i) });
+                mock.send(Some(Frame::Body { id: 4, chunk: Some(i) }));
                 assert_eq!((1, i), rx.recv().unwrap());
             } else {
                 // No write yet
                 mock.assert_no_write(20);
 
-                mock.send(Frame::Body { id: 4, chunk: Some(i) });
+                mock.send(Some(Frame::Body { id: 4, chunk: Some(i) }));
                 assert_eq!((1, i), rx.recv().unwrap());
 
                 // Send a body chunk
-                mock.send(Frame::Body { id: 2, chunk: Some(i) });
+                mock.send(Some(Frame::Body { id: 2, chunk: Some(i) }));
                 assert_eq!((0, i), rx.recv().unwrap());
             }
         }
 
         // Send end-of-stream notification
-        mock.send(Frame::Body { id: 2, chunk: None });
+        mock.send(Some(Frame::Body { id: 2, chunk: None }));
 
         let wr = mock.next_write();
         assert_eq!(Some(2), wr.request_id());
         assert_eq!("hi2u", wr.unwrap_msg());
 
         mock.allow_write();
-        mock.send(Frame::Body { id: 4, chunk: None });
+        mock.send(Some(Frame::Body { id: 4, chunk: None }));
 
         let wr = mock.next_write();
         assert_eq!(Some(4), wr.request_id());
         assert_eq!("hi2u", wr.unwrap_msg());
 
         // Clean shutdown
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -517,9 +517,12 @@ fn test_read_error_as_first_frame() {
 
     mux::run(service, |mock| {
         mock.allow_write();
-        mock.send(Frame::Error { id: 1, error: io::Error::new(io::ErrorKind::Other, "boom") });
+        mock.send(Some(Frame::Error {
+            id: 1,
+            error: io::Error::new(io::ErrorKind::Other, "boom"),
+        }));
 
-        mock.send(Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }

@@ -29,10 +29,10 @@ fn test_ping_pong_close() {
         assert_eq!(Some(0), wr.request_id());
         assert_eq!("ping", wr.unwrap_msg());
 
-        mock.send(mux::message(0, "pong"));
+        mock.send(Some(mux::message(0, "pong")));
         assert_eq!("pong", pong.wait().unwrap().into_inner());
 
-        mock.send(multiplex::Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -48,14 +48,14 @@ fn test_error_on_response() {
         assert_eq!(Some(0), wr.request_id());
         assert_eq!("ping", wr.unwrap_msg());
 
-        mock.send(multiplex::Frame::Error {
+        mock.send(Some(multiplex::Frame::Error {
             id: 0,
             error: io::Error::new(io::ErrorKind::Other, "nope"),
-        });
+        }));
 
         assert_eq!(io::ErrorKind::Other, pong.wait().unwrap_err().kind());
 
-        mock.send(multiplex::Frame::Done);
+        mock.send(None);
         mock.allow_and_assert_drop();
     });
 }
@@ -71,7 +71,7 @@ fn drop_client_while_streaming_body() {
         assert_eq!(Some(0), wr.request_id());
         assert_eq!("ping", wr.unwrap_msg());
 
-        mock.send(mux::message_with_body(0, "pong"));
+        mock.send(Some(mux::message_with_body(0, "pong")));
 
         let mut pong = pong.wait().unwrap();
         assert_eq!("pong", &pong.get_ref()[..]);
@@ -84,13 +84,13 @@ fn drop_client_while_streaming_body() {
         // Send body frames
         for i in 0..3 {
             mock.allow_write();
-            mock.send(mux::body(0, Some(i)));
+            mock.send(Some(mux::body(0, Some(i))));
         }
 
         mock.allow_write();
-        mock.send(mux::body(0, None));
+        mock.send(Some(mux::body(0, None)));
 
-        mock.send(mux::done());
+        mock.send(None);
         mock.allow_write();
 
         let body: Vec<u32> = rx.wait().map(|i| i.unwrap()).collect();
