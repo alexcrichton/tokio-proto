@@ -199,7 +199,7 @@ mod tcp_client;
 pub use tcp_client::{TcpClient, Connect};
 
 mod tcp_server;
-pub use tcp_server::TcpServer;
+pub use tcp_server::{TcpServer, TcpServerInstance};
 
 use tokio_core::reactor::Handle;
 use tokio_service::Service;
