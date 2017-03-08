@@ -27,12 +27,31 @@ slab = "0.3"
 take = "0.1.0"
 rand = "0.3.14"
 smallvec = "0.2.0"
-futures = "0.1.6"
-tokio-core = "0.1.1"
+#futures = "0.1.6"
+#tokio-core = "0.1.1"
 net2 = "0.2"
-tokio-service = "0.1"
+#tokio-service = "0.1"
+
+[dependencies.tokio-service]
+git = "https://github.com/alexcrichton/tokio-service"
+default-features = false
+branch = "tio"
+
+[dependencies.tokio-core]
+git = "https://github.com/alexcrichton/tokio-core"
+default-features = false
+branch = "tio"
+
+[dependencies.futures]
+git = "https://github.com/alexcrichton/futures-rs"
+branch = "close"
+default-features = false
 
 [dev-dependencies]
 env_logger = "0.3.0"
 lazycell = "0.4.0"
 mio = "0.6"
+
+[features]
+default = ["use_std"]
+use_std = ["futures/use_std", "tokio-core/use_std"]
